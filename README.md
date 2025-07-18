@@ -1,6 +1,6 @@
 # comfyui-ez-llm
 
-在`models/llm_adapters`文件夹下创建文件夹，例如我这边的`gemma-3-1b-it`(图片里错了，应该是models/llm不是llm_adapters)
+在`models/LLM`文件夹下创建文件夹，例如我这边的`gemma-3-1b-it`(图片里错了，应该是models/LLM不是llm_adapters，注意大写)
 <img width="488" height="147" alt="image" src="https://github.com/user-attachments/assets/f70015a4-5922-4d2a-9af0-a109f2ef21a4" />
 
 这边创建完以后，去[huggingface](https://huggingface.co/google/gemma-3-1b-it/tree/main)或者[modelscope](https://www.modelscope.cn/models/fireicewolf/google-gemma-3-1b-it/files)把所有文件下载到你刚刚创的文件夹(比如`gemma-3-1b-it`这个文件夹)
