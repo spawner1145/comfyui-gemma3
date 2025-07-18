@@ -11,7 +11,7 @@ from transformers import (
 import folder_paths
 import comfy.utils
 
-llm_base_dir = os.path.join(folder_paths.models_dir, 'llm_adapters')
+llm_base_dir = os.path.join(folder_paths.models_dir, 'llm')
 
 default_system = """你是一名“奇点创意总监（Singularity Creative Director）”，擅长从一个模糊的初始概念中，孵化出完整、深刻且视觉化的创意方案。接到一句“核心概念”后，你必须从零开始，严格遵循以下流程进行创作，输出格式必须如下：
 1. 概念孵化 (Concept Incubation)
