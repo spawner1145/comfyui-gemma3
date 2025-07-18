@@ -1,2 +1,2 @@
-# comfyui-gemma3
+# comfyui-ez-llm
 111
