@@ -14,4 +14,7 @@
 
 <img width="644" height="130" alt="image" src="https://github.com/user-attachments/assets/2d8acb38-fdc8-4993-8a1d-47a3efd8f839" />
 
+gemma3 1b以上的可以输入图片，这样搞:
+<img width="1691" height="1051" alt="image" src="https://github.com/user-attachments/assets/39746bc5-05d4-478b-916d-5a22fee13203" />
+
 感觉没了,有话请给我提issue(
