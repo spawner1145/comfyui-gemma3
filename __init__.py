@@ -1,338 +1,242 @@
-import torch
-from PIL import Image
-import requests
 import os
-import base64
-from io import BytesIO
-import json
+import torch
 import numpy as np
+from PIL import Image
+from transformers import (
+    AutoTokenizer, 
+    AutoModelForCausalLM, 
+    AutoProcessor, 
+    Gemma3ForConditionalGeneration # AutoModelForConditionalGeneration
+)
+import folder_paths
+import comfy.utils
 
-from transformers import AutoProcessor, Gemma3ForConditionalGeneration
+llm_base_dir = os.path.join(folder_paths.models_dir, 'llm_adapters')
 
-def load_image_from_url(url):
+default_system = """你是一名“奇点创意总监（Singularity Creative Director）”，擅长从一个模糊的初始概念中，孵化出完整、深刻且视觉化的创意方案。接到一句“核心概念”后，你必须从零开始，严格遵循以下流程进行创作，输出格式必须如下：
+1. 概念孵化 (Concept Incubation)
+核心解析 (Core Analysis): [用一句话提炼并深化“核心概念”的本质内涵]
+灵感关键词 (Inspiration Keywords): [围绕解析出的内涵，发散出5-8个具备想象空间的关联词]
+世界观简述 (Worldview Sketch): [基于关键词，用2-3句话构建一个独特的背景故事或情境假设]
+2. 视觉维度定义 (Visual Dimension Definition)
+基于上述孵化的世界观，从无到有定义以下11个视觉维度。每个维度用不多于5个词进行精确构想；若某维度与概念关联不大，则写“留白”。
+① 主体 (Subject):
+② 风格 (Style):
+③ 情绪 (Mood):
+④ 场景 (Scene):
+⑤ 媒介/技术 (Medium/Tech):
+⑥ 时代背景 (Era):
+⑦ 关键材质 (Material):
+⑧ 画面构图 (Composition):
+⑨ 光影设计 (Lighting):
+⑩ 主导色调 (Color Palette):
+⑪ 焦点细节 (Focal Detail):
+3. 创意方向探索 (Creative Direction Exploration)
+围绕“故事性 (Narrative)”、“艺术性 (Artistry)”、“冲击力 (Impact)”三轴，提出三种迥异的设计方案（A, B, C）。每种方案需用一句20字以内的中文描述其独特魅力，并给出三轴的0-10分潜力评估。
+方案A: [方案描述] (故事性: X, 艺术性: Y, 冲击力: Z)
+方案B: [方案描述] (故事性: X, 艺术性: Y, 冲击力: Z)
+方案C: [方案描述] (故事性: X, 艺术性: Y, 冲击力: Z)
+4. 最终方案决策 (Final Decision & Rationale)
+→ 最终方案: 方案X
+决策理由 (Rationale): [用简洁有力的语言，阐述为何此方案最具潜力，最能将“核心概念”升华为一个杰出的视觉作品]
+5. AI艺术指令 (Generative Art Prompt)
+将最终方案的完整构想，扩展为一段充满细节、氛围感和叙事性的英文tags prompt，词数不多于200词，用于指导图像生成AI进行最终创作。
+二次元动漫风格，少女，任意主题，细节，粗细错落的线条，素描，立体主义，艺术感"""
+
+if not os.path.exists(llm_base_dir):
+    print(f"警告：模型目录 {llm_base_dir} 不存在。")
+    print(f"请将您的LLM模型（例如 'google/gemma-3-1b-it'）放置在以下路径的子文件夹中：")
+    print(f"{os.path.abspath(llm_base_dir)}")
+    os.makedirs(llm_base_dir, exist_ok=True)
+    llm_model_list = ["模型文件夹未找到"]
+else:
     try:
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-        image = Image.open(BytesIO(response.content)).convert("RGB")
-        return image
+        llm_model_list = [d for d in os.listdir(llm_base_dir) if os.path.isdir(os.path.join(llm_base_dir, d))]
+        if not llm_model_list:
+            llm_model_list = ["没有找到模型"]
     except Exception as e:
-        print(f"从URL加载图片失败: {e}")
-        return None
+        print(f"错误：无法读取LLM模型目录 {llm_base_dir}。")
+        print(e)
+        llm_model_list = ["读取目录出错"]
 
-def decode_base64_image(base64_string):
-    try:
-        if "," in base64_string:
-            _, encoded_data = base64_string.split(",", 1)
-        else:
-            encoded_data = base64_string
-        decoded_image_data = base64.b64decode(encoded_data)
-        image = Image.open(BytesIO(decoded_image_data)).convert("RGB")
-        return image
-    except Exception as e:
-        print(f"解码 Base64 图像失败: {e}")
-        return None
-
-def comfy_image_to_pil(comfy_image_tensor):
-    if comfy_image_tensor is None:
-        return None
-    try:
-        image_np = comfy_image_tensor.squeeze(0).cpu().numpy() * 255
-        return Image.fromarray(image_np.astype('uint8')).convert("RGB")
-    except Exception as e:
-        print(f"转换 ComfyUI 图像张量到 PIL 图像失败: {e}")
-        return None
-
-class Gemma3MultiModalChatNode:
+class LLMImageEncoder:
     @classmethod
-    def IS_CHANGED(s, model_path, model_id="google/gemma-3-4b-it", *args, **kwargs):
-        if os.path.exists(os.path.join(model_path, "config.json")):
-            return False
-        return True
-
-    @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required": {
-                "text_input": ("STRING", {"multiline": True, "default": ""}),
-                "model_path": ("STRING", {"default": "models/gemma3"}), # 模型本地路径
-                "model_id": ("STRING", {"default": "google/gemma-3-4b-it"}), # Hugging Face 模型ID
-                "max_new_tokens": ("INT", {"default": 100, "min": 1, "max": 8192}), # Gemma 3 输出上下文最大为8192
-                "do_sample": ("BOOLEAN", {"default": False}),
-                "temperature": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 2.0, "step": 0.01}),
-                "top_p": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 1.0, "step": 0.01}),
-                "repetition_penalty": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.01}),
-                "num_beams": ("INT", {"default": 1, "min": 1, "max": 10}), # 1表示贪婪搜索或抽样
-                "load_from_hf_if_not_local": ("BOOLEAN", {"default": True}),
+                "image": ("IMAGE", {"tooltip": "需要编码成LLM可用的图像格式的图片。/ The image to be encoded into an LLM-compatible format."}),
             },
-            "optional": {
-                "content_part_1": ("STRING", {"forceInput": True, "optional": True}),
-                "content_part_2": ("STRING", {"forceInput": True, "optional": True}),
-                "content_part_3": ("STRING", {"forceInput": True, "optional": True}),
-
-                "system_prompt": ("STRING", {"multiline": True, "default": "You are a helpful assistant."}),
-                "chat_history_json": ("STRING", {"multiline": True, "default": "[]"}), # 聊天历史的JSON字符串
-                "add_generation_prompt": ("BOOLEAN", {"default": True}), # 控制是否添加模型特定的生成提示
-                "skip_special_tokens": ("BOOLEAN", {"default": True}), # 控制解码时是否跳过特殊token
-                "pad_token_id": ("INT", {"default": None, "placeholder": "Leave empty for default", "optional": True}), # pad_token_id
-                "eos_token_id": ("INT", {"default": None, "placeholder": "Leave empty for default", "optional": True}), # eos_token_id
-            }
         }
 
-    RETURN_TYPES = ("STRING", "STRING",)
-    RETURN_NAMES = ("generated_text", "updated_chat_history_json",)
-    FUNCTION = "execute"
-    CATEGORY = "Gemma3/Multi-Modal Chat"
+    RETURN_TYPES = ("LLM_IMAGE",)
+    FUNCTION = "encode_image"
+    CATEGORY = "LLM"
 
+    def encode_image(self, image: torch.Tensor):
+        img_np = np.clip(255. * image.cpu().numpy().squeeze(), 0, 255).astype(np.uint8)
+        pil_image = Image.fromarray(img_np)
+        llm_image = {"type": "image", "image": pil_image}
+        return (llm_image,)
+
+class LLMTextGenerator:
     def __init__(self):
-        self.model = None
-        self.processor = None
-        self.current_model_path = None
-        self.current_model_id = None
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # Determine device
+        self.loaded_model = None
+        self.loaded_processor = None
+        self.loaded_tokenizer = None
+        self.current_model_name = ""
+        self.current_model_type = None
 
-    def load_model(self, model_path, model_id, load_from_hf_if_not_local):
-        if self.model and self.processor and \
-           self.current_model_path == model_path and \
-           self.current_model_id == model_id:
-            return
-
-        print(f"尝试加载 Gemma 3 模型. 本地路径: {model_path}, Hugging Face ID: {model_id}")
-
-        # 优先从本地路径加载
-        if os.path.exists(model_path) and os.path.isdir(model_path):
-            try:
-                self.model = Gemma3ForConditionalGeneration.from_pretrained(
-                    model_path, torch_dtype=torch.bfloat16
-                ).to(self.device).eval() # Load to determined device, no device_map
-                self.processor = AutoProcessor.from_pretrained(model_path)
-                print(f"成功从本地路径加载模型: {model_path}")
-                self.current_model_path = model_path
-                self.current_model_id = model_id
-                return
-            except Exception as e:
-                print(f"从本地路径 {model_path} 加载模型失败: {e}")
-                if not load_from_hf_if_not_local:
-                    raise FileNotFoundError(f"未在指定本地路径 {model_path} 找到模型，且不允许从Hugging Face下载。")
-        
-        # 如果本地加载失败或不允许本地加载，尝试从Hugging Face下载
-        if load_from_hf_if_not_local:
-            print(f"尝试从 Hugging Face 下载模型: {model_id} 到 {model_path}")
-            os.makedirs(model_path, exist_ok=True) 
-            try:
-                self.model = Gemma3ForConditionalGeneration.from_pretrained(
-                    model_id, cache_dir=model_path, torch_dtype=torch.bfloat16
-                ).to(self.device).eval() # Load to determined device, no device_map
-                self.processor = AutoProcessor.from_pretrained(model_id, cache_dir=model_path)
-                print(f"成功从 Hugging Face 下载并加载模型: {model_id}, 缓存到 {model_path}")
-                self.current_model_path = model_path
-                self.current_model_id = model_id
-            except Exception as e:
-                print(f"从 Hugging Face 下载/加载模型失败: {e}")
-                raise
-        else:
-            raise FileNotFoundError(f"未在指定路径 {model_path} 找到 Gemma 3 模型，且不允许从 Hugging Face 下载。")
-
-    def process_generic_content_part(self, content_string):
-        content_items = []
-        if not content_string:
-            return content_items
-
-        try:
-            parsed_content = json.loads(content_string)
-            if isinstance(parsed_content, dict) and "type" in parsed_content:
-                if parsed_content["type"] == "image" and "image" in parsed_content and isinstance(parsed_content["image"], str) and parsed_content["image"].startswith("data:image/"):
-                    content_items.append(parsed_content)
-                    print("Processed content part as JSON-encoded image.")
-                elif parsed_content["type"] == "text" and "text" in parsed_content and isinstance(parsed_content["text"], str):
-                    content_items.append(parsed_content)
-                    print("Processed content part as JSON-encoded text.")
-                else:
-                    content_items.append({"type": "text", "text": content_string})
-                    print("Processed unknown JSON content part as plain text.")
-            elif isinstance(parsed_content, list):
-                for item in parsed_content:
-                    if isinstance(item, dict) and "type" in item:
-                        if item["type"] == "image" and "image" in item and isinstance(item["image"], str) and item["image"].startswith("data:image/"):
-                            content_items.append(item)
-                        elif item["type"] == "text" and "text" in item and isinstance(item["text"], str):
-                            content_items.append(item)
-                        else:
-                            print(f"Warning: Unrecognized item in JSON list: {item}")
-                print("Processed content part as JSON list.")
-            else:
-                content_items.append({"type": "text", "text": content_string})
-                print("Processed content part as plain text (unrecognized JSON structure).")
-        except json.JSONDecodeError:
-            content_items.append({"type": "text", "text": content_string})
-            print("Processed content part as plain text.")
-        return content_items
-
-    def execute(self, text_input, model_path, model_id, max_new_tokens, do_sample, temperature, top_p,
-                repetition_penalty, num_beams, load_from_hf_if_not_local,
-                content_part_1="", content_part_2="", content_part_3="", 
-                system_prompt="You are a helpful assistant.", chat_history_json="[]",
-                add_generation_prompt=True, skip_special_tokens=True,
-                pad_token_id=None, eos_token_id=None):
-
-        self.load_model(model_path, model_id, load_from_hf_if_not_local)
-
-        try:
-            chat_history = json.loads(chat_history_json)
-            if not isinstance(chat_history, list):
-                print("警告: chat_history_json 不是有效的列表，将重置为 []。")
-                chat_history = []
-        except json.JSONDecodeError:
-            print("警告: chat_history_json 解析失败，将重置为 []。")
-            chat_history = []
-
-        messages = [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": system_prompt}]
-            }
-        ]
-        messages.extend(chat_history)
-        user_content = []
-
-        if text_input:
-            user_content.append({"type": "text", "text": text_input})
-
-        user_content.extend(self.process_generic_content_part(content_part_1))
-        user_content.extend(self.process_generic_content_part(content_part_2))
-        user_content.extend(self.process_generic_content_part(content_part_3))
-
-        if not user_content:
-            print("当前轮次未提供有效内容")
-            return ("无内容可处理。", json.dumps(chat_history, ensure_ascii=False, indent=2))
-
-        messages.append({"role": "user", "content": user_content})
-
-        inputs = self.processor.apply_chat_template(
-            messages,
-            add_generation_prompt=add_generation_prompt,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt"
-        ).to(self.model.device, dtype=torch.bfloat16)
-
-        input_len = inputs["input_ids"].shape[-1]
-
-        generation_kwargs = {
-            "max_new_tokens": max_new_tokens,
-            "do_sample": do_sample,
-            "repetition_penalty": repetition_penalty,
-            "num_beams": num_beams,
-        }
-
-        if do_sample:
-            generation_kwargs["temperature"] = temperature
-            generation_kwargs["top_p"] = top_p
-        
-        if pad_token_id is not None:
-            generation_kwargs["pad_token_id"] = pad_token_id
-        if eos_token_id is not None:
-            generation_kwargs["eos_token_id"] = eos_token_id
-        
-        with torch.inference_mode():
-            generation = self.model.generate(**inputs, **generation_kwargs)
-            generation = generation[0][input_len:]
-
-        decoded_text = self.processor.decode(generation, skip_special_tokens=skip_special_tokens)
-        
-        serializable_chat_history = []
-        for msg in messages[1:]:
-            if msg["role"] == "user":
-                serializable_content = []
-                for item in msg["content"]:
-                    if item["type"] == "text":
-                        serializable_content.append(item)
-                    elif item["type"] == "image" and isinstance(item["image"], str) and item["image"].startswith("data:image/"):
-                        serializable_content.append(item)
-                if serializable_content:
-                    serializable_chat_history.append({"role": "user", "content": serializable_content})
-            elif msg["role"] == "model":
-                serializable_chat_history.append(msg)
-
-        serializable_chat_history.append({"role": "model", "content": [{"type": "text", "text": decoded_text}]})
-
-        updated_chat_history_json = json.dumps(serializable_chat_history, ensure_ascii=False, indent=2)
-
-        return (decoded_text, updated_chat_history_json,)
-
-class ImageEncoderContentPartNode:
     @classmethod
-    def INPUT_TYPES(s):
+    def INPUT_TYPES(cls):
         return {
             "required": {
-                "image_input": ("IMAGE", ),
-                "encoding_format": (["JPEG", "PNG", "WEBP"], {"default": "JPEG"}),
-                "quality": ("INT", {"default": 90, "min": 0, "max": 100, "step": 1}),
+                "model_name": (llm_model_list, {"tooltip": "选择要加载的LLM模型文件夹。/ Select the LLM model folder to load."}),
+                "model_mode": (["auto", "text", "multimodal"], {"default": "auto", "tooltip": "设置模型加载模式：'auto'自动检测，'text'纯文本，'multimodal'多模态。/ Set model loading mode: 'auto', 'text', or 'multimodal'."}),
+                "user_prompt": ("STRING", {"multiline": True, "default": "我要玩原神", "tooltip": "用户提出的具体问题或指令。/ The specific question or instruction from the user."}),
+                "system_prompt": ("STRING", {"multiline": True, "default": default_system, "tooltip": "定义模型的角色和行为，进行高层次的指令约束。/ Define the model's role and behavior with a high-level instruction."}),
+                "max_new_tokens": ("INT", {"default": 512, "min": 32, "max": 8192, "step": 32, "tooltip": "生成文本的最大长度（词元数）。/ Maximum length of the generated text in tokens."}),
+                "min_new_tokens": ("INT", {"default": 0, "min": 0, "max": 8192, "step": 16, "tooltip": "生成文本的最小长度，用于避免过短的回答。/ Minimum length of the generated text, to avoid overly short responses."}),
+                
+                "do_sample": ("BOOLEAN", {"default": True, "tooltip": "是否使用采样策略。True=随机采样，False=确定性解码。/ Whether to use sampling. True=stochastic, False=deterministic."}),
+                "temperature": ("FLOAT", {"default": 0.7, "min": 0.0, "max": 10.0, "step": 0.01, "tooltip": "控制随机性。值越高随机性越强，反之亦然。/ Controls randomness. Higher values increase randomness."}),
+                "top_p": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "从累积概率超过p的最小词元集中采样。/ Samples from the smallest set of tokens whose cumulative probability exceeds p."}),
+                "top_k": ("INT", {"default": 50, "min": 0, "max": 200, "step": 1, "tooltip": "从概率最高的k个词元中采样。/ Samples from the top k most likely tokens."}),
+                
+                "repetition_penalty": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05, "tooltip": "对重复词元的惩罚因子，大于1可减少重复。/ Penalty for repeated tokens. Values > 1 reduce repetition."}),
+                "no_repeat_ngram_size": ("INT", {"default": 0, "min": 0, "max": 20, "step": 1, "tooltip": "禁止指定长度的N-gram重复出现。/ Prevents n-grams of this size from repeating."}),
+                
+                "num_beams": ("INT", {"default": 1, "min": 1, "max": 16, "step": 1, "tooltip": "集束搜索的光束数。大于1启用，速度变慢但质量可能更高。/ Number of beams for beam search. >1 enables it, which is slower but may yield higher quality."}),
+                "length_penalty": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 5.0, "step": 0.05, "tooltip": "长度惩罚因子，仅在num_beams>1时生效。/ Length penalty factor, only effective when num_beams > 1."}),
             },
             "optional": {
-                "image_url_input": ("STRING", {"default": "", "multiline": False, "placeholder": "或输入图片URL", "optional": True}),
-                "image_base64_input": ("STRING", {"multiline": True, "default": "", "placeholder": "或输入Base64编码的图片", "optional": True}),
-            }
+                "image_1": ("LLM_IMAGE",),
+                "image_2": ("LLM_IMAGE",),
+                "image_3": ("LLM_IMAGE",),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO"
+            },
         }
 
     RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("content_part_json",)
-    FUNCTION = "encode_image"
-    CATEGORY = "Gemma3/Utils"
+    RETURN_NAMES = ("generated_text",)
+    FUNCTION = "generate_text"
+    CATEGORY = "LLM"
 
-    def encode_image(self, image_input, encoding_format, quality, image_url_input="", image_base64_input=""):
-        pil_image = None
+    def generate_text(self, model_name, model_mode, system_prompt, user_prompt, 
+                      max_new_tokens, min_new_tokens, do_sample, temperature, top_p, top_k,
+                      repetition_penalty, no_repeat_ngram_size, num_beams, length_penalty,
+                      image_1=None, image_2=None, image_3=None, prompt=None, extra_pnginfo=None):
+        
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        if image_input is not None:
-            pil_image = comfy_image_to_pil(image_input)
-            if pil_image:
-                print("已处理 ComfyUI 图像输入。")
-        elif image_url_input:
-            pil_image = load_image_from_url(image_url_input)
-            if pil_image:
-                print(f"已从URL '{image_url_input}' 加载图像。")
-        elif image_base64_input:
-            pil_image = decode_base64_image(image_base64_input)
-            if pil_image:
-                print("已成功解码 Base64 图像。")
+        load_as_vision = False
+        if model_mode == "auto":
+            load_as_vision = "1b" not in model_name
+            print(f"模式 'auto': 根据模型名称自动检测。检测结果 -> {'多模态' if load_as_vision else '纯文本'}")
+        elif model_mode == "multimodal":
+            load_as_vision = True
+            print("模式 'multimodal': 强制作为多模态模型加载。")
+        else:
+            load_as_vision = False
+            print("模式 'text': 强制作为纯文本模型加载。")
+        
+        model_type_changed = (self.current_model_type != ('vision' if load_as_vision else 'text'))
+        if self.current_model_name != model_name or self.loaded_model is None or model_type_changed:
+            if "模型" in model_name or "读取" in model_name:
+                raise Exception(f"无效的模型名称: {model_name}。请检查您的模型文件夹。")
 
-        if pil_image is None:
-            return ("无法处理图像输入，请检查输入。",)
+            model_path = os.path.join(llm_base_dir, model_name)
+            
+            if self.loaded_model is not None:
+                del self.loaded_model
+                if self.loaded_processor: del self.loaded_processor
+                if self.loaded_tokenizer: del self.loaded_tokenizer
+                self.loaded_model = self.loaded_processor = self.loaded_tokenizer = None
+                torch.cuda.empty_cache()
+                print(f"已卸载旧模型: {self.current_model_name}")
+            
+            print(f"正在从路径加载新模型: {model_path}")
+            pbar = comfy.utils.ProgressBar(2)
+            try:
+                if load_as_vision:
+                    self.loaded_processor = AutoProcessor.from_pretrained(model_path)
+                    pbar.update(1)
+                    self.loaded_model = Gemma3ForConditionalGeneration.from_pretrained(model_path, device_map="auto").eval()
+                    self.current_model_type = 'vision'
+                else:
+                    self.loaded_tokenizer = AutoTokenizer.from_pretrained(model_path)
+                    pbar.update(1)
+                    self.loaded_model = AutoModelForCausalLM.from_pretrained(model_path, device_map="auto").eval()
+                    self.current_model_type = 'text'
+                pbar.update(1)
+                self.current_model_name = model_name
+                print(f"模型 {model_name} 加载成功。")
 
-        buffered = BytesIO()
-        try:
-            if encoding_format == "JPEG":
-                pil_image.save(buffered, format="JPEG", quality=quality)
-                mime_type = "image/jpeg"
-            elif encoding_format == "PNG":
-                pil_image.save(buffered, format="PNG")
-                mime_type = "image/png"
-            elif encoding_format == "WEBP":
-                pil_image.save(buffered, format="WEBP", quality=quality)
-                mime_type = "image/webp"
-            else:
-                raise ValueError("不支持的编码格式。")
+            except Exception as e:
+                self.current_model_name = ""
+                self.current_model_type = None
+                torch.cuda.empty_cache()
+                raise Exception(f"加载模型失败: {e}")
+        
+        if self.current_model_type == 'vision':
+            messages = []
+            if system_prompt.strip(): messages.append({"role": "system", "content": [{"type": "text", "text": system_prompt}]})
+            user_content = []
+            images = [img for img in [image_1, image_2, image_3] if img is not None]
+            if images:
+                for img_data in images: user_content.append({"type": "image", "image": img_data['image']})
+                print(f"已添加 {len(images)} 张图像到提示中。")
+            user_content.append({"type": "text", "text": user_prompt})
+            messages.append({"role": "user", "content": user_content})
+            inputs = self.loaded_processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(self.loaded_model.device)
+        else:
+            if any([image_1, image_2, image_3]): print("警告：当前为纯文本模式，所有图像输入都将被忽略。")
+            messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+            inputs = self.loaded_tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt").to(device)
 
-            img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+        generation_kwargs = {
+            "max_new_tokens": max_new_tokens,
+            "min_new_tokens": min_new_tokens,
+            "do_sample": do_sample,
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "repetition_penalty": repetition_penalty,
+            "no_repeat_ngram_size": no_repeat_ngram_size,
+            "num_beams": num_beams,
+            "length_penalty": length_penalty,
+        }
+        
+        if not do_sample:
+            generation_kwargs.pop('temperature', None)
+            generation_kwargs.pop('top_p', None)
+            generation_kwargs.pop('top_k', None)
+            print(f"生成模式: 确定性解码 (Beam Search: {'On' if num_beams > 1 else 'Off'})")
+        else:
+            print("生成模式: 采样解码 (Sampling)")
 
-            content_part_data = {
-                "type": "image",
-                "image": f"data:{mime_type};base64,{img_base64}"
-            }
+        print(f"开始生成文本，参数: {generation_kwargs}")
 
-            json_output = json.dumps(content_part_data, ensure_ascii=False)
-            return (json_output,)
+        with torch.inference_mode():
+            outputs = self.loaded_model.generate(**inputs, **generation_kwargs)
+        
+        input_length = inputs['input_ids'].shape[1]
+        generated_tokens = outputs[:, input_length:]
+        decoder = self.loaded_processor if self.current_model_type == 'vision' else self.loaded_tokenizer
+        result_text = decoder.decode(generated_tokens[0], skip_special_tokens=True)
 
-        except Exception as e:
-            print(f"图像编码或格式化失败: {e}")
-            return (f"图像编码或格式化失败: {e}",)
-
+        print(f"输出\n{result_text}\n")
+        
+        return (result_text,)
 
 NODE_CLASS_MAPPINGS = {
-    "Gemma3MultiModalChatNode": Gemma3MultiModalChatNode,
-    "ImageEncoderContentPartNode": ImageEncoderContentPartNode
+    "LLMTextGenerator": LLMTextGenerator,
+    "LLMImageEncoder": LLMImageEncoder,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Gemma3MultiModalChatNode": "Gemma 3",
-    "ImageEncoderContentPartNode": "图像编码器 (Gemma3)"
+    "LLMTextGenerator": "LLM 文本生成器",
+    "LLMImageEncoder": "LLM 图像编码器",
 }
