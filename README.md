@@ -9,7 +9,9 @@
 
 启动以后这么用：
 <img width="1624" height="1074" alt="image" src="https://github.com/user-attachments/assets/83797633-e5d0-4cf7-94e0-749316f6ab9e" />
+
 这边的model_mode三个如果是gemma3系列直接选auto，兼容了gemma3全系列，别的模型(比如gemma2,llama这种就选text，兼容了所有的纯文本模型，多模态目前只兼容gemma3)
+
 <img width="644" height="130" alt="image" src="https://github.com/user-attachments/assets/2d8acb38-fdc8-4993-8a1d-47a3efd8f839" />
 
 感觉没了,有话请给我提issue(
